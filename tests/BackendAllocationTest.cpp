@@ -16,6 +16,8 @@
 #include "tools/ToolUtils.h"
 
 #ifdef SK_GL
+#include "src/gpu/gl/GrGLCaps.h"
+#include "src/gpu/gl/GrGLDefines.h"
 #include "src/gpu/gl/GrGLGpu.h"
 #include "src/gpu/gl/GrGLUtil.h"
 #endif
@@ -100,14 +102,6 @@ void test_wrapping(GrContext* context, skiatest::Reporter* reporter,
 
 static bool isBGRA(const GrBackendFormat& format) {
     switch (format.backend()) {
-        case GrBackendApi::kMetal:
-#ifdef SK_METAL
-            return GrMtlFormatIsBGRA(format.asMtlFormat());
-#else
-            return false;
-#endif
-        case GrBackendApi::kDawn:
-            return false;
         case GrBackendApi::kOpenGL:
 #ifdef SK_GL
             return format.asGLFormat() == GrGLFormat::kBGRA8;
@@ -123,18 +117,34 @@ static bool isBGRA(const GrBackendFormat& format) {
             return false;
 #endif
         }
-        case GrBackendApi::kMock:
+        case GrBackendApi::kMetal:
+#ifdef SK_METAL
+            return GrMtlFormatIsBGRA(format.asMtlFormat());
+#else
+            return false;
+#endif
+        case GrBackendApi::kDirect3D:
+#ifdef SK_DIRECT3D
+            return false; // TODO
+#else
+            return false;
+#endif
+        case GrBackendApi::kDawn:
+            return false;
+        case GrBackendApi::kMock: {
+            SkImage::CompressionType compression = format.asMockCompressionType();
+            if (compression != SkImage::CompressionType::kNone) {
+                return false; // No compressed formats are BGRA
+            }
+
             return format.asMockColorType() == GrColorType::kBGRA_8888;
+        }
     }
     SkUNREACHABLE;
 }
 
 static bool isRGB(const GrBackendFormat& format) {
     switch (format.backend()) {
-        case GrBackendApi::kMetal:
-            return false;  // Metal doesn't even pretend to support this
-        case GrBackendApi::kDawn:
-            return false;
         case GrBackendApi::kOpenGL:
 #ifdef SK_GL
             return format.asGLFormat() == GrGLFormat::kRGB8;
@@ -150,6 +160,12 @@ static bool isRGB(const GrBackendFormat& format) {
             return false;
 #endif
         }
+        case GrBackendApi::kMetal:
+            return false;  // Metal doesn't even pretend to support this
+        case GrBackendApi::kDirect3D:
+            return false;  // Not supported in Direct3D 12
+        case GrBackendApi::kDawn:
+            return false;
         case GrBackendApi::kMock:
             return false;  // No GrColorType::kRGB_888
     }
@@ -367,8 +383,11 @@ static void check_mipmaps(GrContext* context, const GrBackendTexture& backendTex
         bool result = surf->readPixels(actual2, 0, 0);
         REPORTER_ASSERT(reporter, result);
 
+        SkString str;
+        str.appendf("mip-level %d", i);
+
         check_solid_pixmap(reporter, expectedColors[i], actual2, skColorType,
-                           label, "mip-level failure");
+                           label, str.c_str());
     }
 }
 
@@ -583,8 +602,10 @@ DEF_GPUTEST_FOR_RENDERING_CONTEXTS(ColorTypeBackendAllocationTest, reporter, ctx
         { kBGRA_8888_SkColorType,         { 1, 0, 0, 1.0f }        },
         // TODO: readback is busted when alpha = 0.5f (perhaps premul vs. unpremul)
         { kRGBA_1010102_SkColorType,      { .25f, .5f, .75f, 1.0f }},
-        // The kRGB_101010x_SkColorType has no Ganesh correlate
+        // RGB/BGR 101010x and BGRA 1010102 have no Ganesh correlate
         { kRGB_101010x_SkColorType,       { 0, 0.5f, 0, 0.5f }     },
+        { kBGRA_1010102_SkColorType,      { 0, 0.5f, 0, 0.5f }     },
+        { kBGR_101010x_SkColorType,       { 0, 0.5f, 0, 0.5f }     },
         { kGray_8_SkColorType,            kGrayCol                 },
         { kRGBA_F16Norm_SkColorType,      SkColors::kLtGray        },
         { kRGBA_F16_SkColorType,          SkColors::kYellow        },
@@ -597,7 +618,7 @@ DEF_GPUTEST_FOR_RENDERING_CONTEXTS(ColorTypeBackendAllocationTest, reporter, ctx
         { kR16G16B16A16_unorm_SkColorType,{ .25f, .5f, .75f, 1 }   },
     };
 
-    GR_STATIC_ASSERT(kLastEnum_SkColorType == SK_ARRAY_COUNT(combinations));
+    static_assert(kLastEnum_SkColorType == SK_ARRAY_COUNT(combinations));
 
     for (auto combo : combinations) {
         SkColorType colorType = combo.fColorType;
@@ -718,10 +739,6 @@ DEF_GPUTEST_FOR_RENDERING_CONTEXTS(ColorTypeBackendAllocationTest, reporter, ctx
 
 ///////////////////////////////////////////////////////////////////////////////
 #ifdef SK_GL
-
-#include "src/gpu/gl/GrGLCaps.h"
-#include "src/gpu/gl/GrGLDefines.h"
-#include "src/gpu/gl/GrGLUtil.h"
 
 DEF_GPUTEST_FOR_ALL_GL_CONTEXTS(GLBackendAllocationTest, reporter, ctxInfo) {
     sk_gpu_test::GLTestContext* glCtx = ctxInfo.glContext();

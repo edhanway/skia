@@ -523,17 +523,14 @@ DEF_GPUTEST_FOR_RENDERING_CONTEXTS(WritePixelsPendingIO, reporter, ctxInfo) {
 
     {
         // Seed the resource cached with a scratch texture that will be reused by writePixels
-        GrSurfaceDesc desc;
-        desc.fWidth = 32;
-        desc.fHeight = 64;
-        desc.fConfig = kRGBA_8888_GrPixelConfig;
+        static constexpr SkISize kDims = {32, 64};
 
         const GrBackendFormat format = caps->getDefaultBackendFormat(GrColorType::kRGBA_8888,
                                                                      GrRenderable::kNo);
 
         sk_sp<GrTextureProxy> temp = proxyProvider->createProxy(
-                format, desc, GrRenderable::kNo, 1, kTopLeft_GrSurfaceOrigin, GrMipMapped::kNo,
-                SkBackingFit::kApprox, SkBudgeted::kYes, GrProtected::kNo);
+                format, kDims, GrRenderable::kNo, 1, GrMipMapped::kNo, SkBackingFit::kApprox,
+                SkBudgeted::kYes, GrProtected::kNo);
         temp->instantiate(context->priv().resourceProvider());
     }
 

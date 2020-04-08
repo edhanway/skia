@@ -30,8 +30,7 @@ declare_args() {
   win_toolchain_version = ""
 
   clang_win = ""
-
-  skia_moltenvk_path = ""
+  clang_win_version = ""
 
   ncli = ""
   ncli_version = "4.0"
@@ -148,7 +147,8 @@ if (is_win) {
   if (win_vc == "") {
     win_vc = exec_script("//gn/find_msvc.py", [], "trim string")
   }
-  assert(win_vc != "")  # Could not find VC installation. Set win_vc to your VC directory.
+  assert(win_vc != "")  # Could not find VC installation. Set win_vc to your VC
+                        # directory.
 }
 
 if (is_win) {
@@ -168,6 +168,14 @@ if (is_win) {
                                     min_win_sdk_version
                                   ],
                                   "trim string")
+  }
+  if (clang_win != "" && clang_win_version == "") {
+    clang_win_version = exec_script("//gn/highest_version_dir.py",
+                                    [
+                                      "$clang_win/lib/clang",
+                                      "[0-9]+\.[0-9]+\.[0-9]+",
+                                    ],
+                                    "trim string")
   }
 }
 

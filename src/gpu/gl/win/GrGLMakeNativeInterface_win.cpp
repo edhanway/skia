@@ -13,6 +13,9 @@
 #include "include/gpu/gl/GrGLInterface.h"
 #include "src/gpu/gl/GrGLUtil.h"
 
+#include <memory>
+#include <type_traits>
+
 #if defined(_M_ARM64)
 
 sk_sp<const GrGLInterface> GrGLMakeNativeInterface() { return nullptr; }

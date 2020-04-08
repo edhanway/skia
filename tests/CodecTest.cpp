@@ -38,7 +38,6 @@
 #include "src/core/SkAutoMalloc.h"
 #include "src/core/SkColorSpacePriv.h"
 #include "src/core/SkMD5.h"
-#include "src/core/SkMakeUnique.h"
 #include "src/core/SkStreamPriv.h"
 #include "tests/FakeStreams.h"
 #include "tests/Test.h"
@@ -151,7 +150,7 @@ static void test_in_stripes(skiatest::Reporter* r, SkCodec* codec, const SkImage
     for (int oddEven = 1; oddEven >= 0; oddEven--) {
         for (int y = oddEven * stripeHeight; y < height; y += 2 * stripeHeight) {
             SkIRect subset = SkIRect::MakeLTRB(0, y, info.width(),
-                                               SkTMin(y + stripeHeight, height));
+                                               std::min(y + stripeHeight, height));
             SkCodec::Options options;
             options.fSubset = &subset;
             if (SkCodec::kSuccess != codec->startIncrementalDecode(info, bm.getAddr(0, y),
@@ -542,9 +541,9 @@ DEF_TEST(Codec_raw, r) {
 static void test_invalid_stream(skiatest::Reporter* r, const void* stream, size_t len) {
     // Neither of these calls should return a codec. Bots should catch us if we leaked anything.
     REPORTER_ASSERT(r, !SkCodec::MakeFromStream(
-                                        skstd::make_unique<SkMemoryStream>(stream, len, false)));
+                                        std::make_unique<SkMemoryStream>(stream, len, false)));
     REPORTER_ASSERT(r, !SkAndroidCodec::MakeFromStream(
-                                        skstd::make_unique<SkMemoryStream>(stream, len, false)));
+                                        std::make_unique<SkMemoryStream>(stream, len, false)));
 }
 
 // Ensure that SkCodec::NewFromStream handles freeing the passed in SkStream,
@@ -848,7 +847,7 @@ public:
         , fLimit(limit) {}
 
     size_t peek(void* buf, size_t bytes) const override {
-        return fStream.peek(buf, SkTMin(bytes, fLimit));
+        return fStream.peek(buf, std::min(bytes, fLimit));
     }
     size_t read(void* buf, size_t bytes) override {
         return fStream.read(buf, bytes);
@@ -877,7 +876,7 @@ DEF_TEST(Codec_raw_notseekable, r) {
     }
 
     std::unique_ptr<SkCodec> codec(SkCodec::MakeFromStream(
-                                           skstd::make_unique<NotAssetMemStream>(std::move(data))));
+                                           std::make_unique<NotAssetMemStream>(std::move(data))));
     REPORTER_ASSERT(r, codec);
 
     test_info(r, codec.get(), codec->getInfo(), SkCodec::kSuccess, nullptr);
@@ -896,13 +895,13 @@ DEF_TEST(Codec_webp_peek, r) {
 
     // The limit is less than webp needs to peek or read.
     std::unique_ptr<SkCodec> codec(SkCodec::MakeFromStream(
-                                           skstd::make_unique<LimitedPeekingMemStream>(data, 25)));
+                                           std::make_unique<LimitedPeekingMemStream>(data, 25)));
     REPORTER_ASSERT(r, codec);
 
     test_info(r, codec.get(), codec->getInfo(), SkCodec::kSuccess, nullptr);
 
     // Similarly, a stream which does not peek should still succeed.
-    codec = SkCodec::MakeFromStream(skstd::make_unique<LimitedPeekingMemStream>(data, 0));
+    codec = SkCodec::MakeFromStream(std::make_unique<LimitedPeekingMemStream>(data, 0));
     REPORTER_ASSERT(r, codec);
 
     test_info(r, codec.get(), codec->getInfo(), SkCodec::kSuccess, nullptr);
@@ -1556,7 +1555,7 @@ static void test_encode_icc(skiatest::Reporter* r, SkEncodedImageFormat format) 
 
     // Test with P3 color space.
     SkDynamicMemoryWStream p3Buf;
-    sk_sp<SkColorSpace> p3 = SkColorSpace::MakeRGB(SkNamedTransferFn::kSRGB, SkNamedGamut::kDCIP3);
+    sk_sp<SkColorSpace> p3 = SkColorSpace::MakeRGB(SkNamedTransferFn::kSRGB, SkNamedGamut::kDisplayP3);
     pixmap.setColorSpace(p3);
     encode_format(&p3Buf, pixmap, format);
     sk_sp<SkData> p3Data = p3Buf.detachAsData();
@@ -1773,5 +1772,62 @@ DEF_TEST(Codec_crbug807324, r) {
             ERRORF(r, "image should not be transparent! %i, %i is 0", i, j);
             return;
         }
+    }
+}
+
+DEF_TEST(Codec_F16_noColorSpace, r) {
+    const char* path = "images/color_wheel.png";
+    auto data = GetResourceAsData(path);
+    if (!data) {
+        return;
+    }
+
+    auto codec = SkCodec::MakeFromData(std::move(data));
+    SkImageInfo info = codec->getInfo().makeColorType(kRGBA_F16_SkColorType)
+                                       .makeColorSpace(nullptr);
+    test_info(r, codec.get(), info, SkCodec::kSuccess, nullptr);
+}
+
+// These test images have ICC profiles that do not map to an SkColorSpace.
+// Verify that decoding them with a null destination space does not perform
+// color space transformations.
+DEF_TEST(Codec_noConversion, r) {
+    const struct Rec {
+        const char* name;
+        SkColor color;
+    } recs[] = {
+      { "images/cmyk_yellow_224_224_32.jpg", 0xFFD8FC04 },
+      { "images/wide_gamut_yellow_224_224_64.jpeg",0xFFE0E040 },
+    };
+
+    for (const auto& rec : recs) {
+        auto data = GetResourceAsData(rec.name);
+        if (!data) {
+            continue;
+        }
+
+        auto codec = SkCodec::MakeFromData(std::move(data));
+        if (!codec) {
+            ERRORF(r, "Failed to create a codec from %s", rec.name);
+            continue;
+        }
+
+        const auto* profile = codec->getICCProfile();
+        if (!profile) {
+            ERRORF(r, "Expected %s to have a profile", rec.name);
+            continue;
+        }
+
+        auto cs = SkColorSpace::Make(*profile);
+        REPORTER_ASSERT(r, !cs.get());
+
+        SkImageInfo info = codec->getInfo().makeColorSpace(nullptr);
+        SkBitmap bm;
+        bm.allocPixels(info);
+        if (codec->getPixels(info, bm.getPixels(), bm.rowBytes()) != SkCodec::kSuccess) {
+            ERRORF(r, "Failed to decode %s", rec.name);
+            continue;
+        }
+        REPORTER_ASSERT(r, bm.getColor(0, 0) == rec.color);
     }
 }

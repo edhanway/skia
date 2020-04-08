@@ -1,4 +1,4 @@
-describe('CanvasKit\'s Path Behavior', function() {
+describe('CanvasKit\'s Font Behavior', function() {
     let container = document.createElement('div');
     document.body.appendChild(container);
     const CANVAS_WIDTH = 600;
@@ -248,6 +248,136 @@ describe('CanvasKit\'s Path Behavior', function() {
             if (fontMgr.dumpFamilies) {
                 fontMgr.dumpFamilies();
             }
+            fontMgr.delete();
+            done();
+        }));
+    });
+
+    it('can load fonts of a variety of types', function(done) {
+        let otfFontBuffer = null;
+        const otfFontLoaded = fetch('/assets/Roboto-Regular.otf').then(
+            (response) => response.arrayBuffer()).then(
+            (buffer) => {
+                otfFontBuffer = buffer;
+            });
+
+        let woffFontBuffer = null;
+        const woffFontLoaded = fetch('/assets/Roboto-Regular.woff').then(
+            (response) => response.arrayBuffer()).then(
+            (buffer) => {
+                woffFontBuffer = buffer;
+            });
+
+        let woff2FontBuffer = null;
+        const woff2FontLoaded = fetch('/assets/Roboto-Regular.woff2').then(
+            (response) => response.arrayBuffer()).then(
+            (buffer) => {
+                woff2FontBuffer = buffer;
+            });
+
+        let ttcFontBuffer = null;
+        const ttcFontLoaded = fetch('/assets/test.ttc').then(
+            (response) => response.arrayBuffer()).then(
+            (buffer) => {
+                ttcFontBuffer = buffer;
+            });
+
+        Promise.all([LoadCanvasKit, otfFontLoaded, bungeeFontLoaded, woffFontLoaded,
+                     woff2FontLoaded, ttcFontLoaded]).then(catchException(done, () => {
+            const surface = CanvasKit.MakeCanvasSurface('test');
+            expect(surface).toBeTruthy('Could not make surface')
+            if (!surface) {
+                done();
+                return;
+            }
+            const fontMgr = CanvasKit.SkFontMgr.RefDefault();
+            const canvas = surface.getCanvas();
+            const fontPaint = new CanvasKit.SkPaint();
+            fontPaint.setAntiAlias(true);
+            fontPaint.setStyle(CanvasKit.PaintStyle.Fill);
+            const inputs = [{
+                type: '.ttf font',
+                buffer: bungeeFontBuffer,
+                y: 60,
+            },{
+                type: '.otf font',
+                buffer: otfFontBuffer,
+                y: 90,
+            },{
+                // Not currently supported by Skia
+                type: '.woff font',
+                buffer: woffFontBuffer,
+                y: 120,
+            },{
+                // Not currently supported by Skia
+                type: '.woff2 font',
+                buffer: woff2FontBuffer,
+                y: 150,
+            }];
+
+            const defaultFont = new CanvasKit.SkFont(null, 24);
+            canvas.drawText(`The following should be ${inputs.length + 1} lines of text:`, 5, 30, fontPaint, defaultFont);
+
+            for (const fontType of inputs) {
+                // smoke test that the font bytes loaded.
+                expect(fontType.buffer).toBeTruthy(fontType.type + ' did not load');
+
+                const typeface = fontMgr.MakeTypefaceFromData(fontType.buffer);
+                const font = new CanvasKit.SkFont(typeface, 24);
+
+                if (font && typeface) {
+                    canvas.drawText(fontType.type + ' loaded', 5, fontType.y, fontPaint, font);
+                } else {
+                    canvas.drawText(fontType.type + ' *not* loaded', 5, fontType.y, fontPaint, defaultFont);
+                }
+                font && font.delete();
+                typeface && typeface.delete();
+            }
+
+            // The only ttc font I could find was 14 MB big, so I'm using the smaller test font,
+            // which doesn't have very many glyphs in it, so we just check that we got a non-zero
+            // typeface for it. I was able to load NotoSansCJK-Regular.ttc just fine in a
+            // manual test.
+            expect(ttcFontBuffer).toBeTruthy('.ttc font did not load');
+            const typeface = fontMgr.MakeTypefaceFromData(ttcFontBuffer);
+            expect(typeface).toBeTruthy('.ttc font');
+            if (typeface) {
+                canvas.drawText('.ttc loaded', 5, 180, fontPaint, defaultFont);
+                typeface.delete();
+            } else {
+                canvas.drawText('.ttc *not* loaded', 5, 180, fontPaint, defaultFont);
+            }
+
+            defaultFont.delete();
+            fontPaint.delete();
+            fontMgr.delete();
+            reportSurface(surface, 'various_font_formats', done);
+        }));
+    });
+
+    it('can measure text very precisely with proper settings', function(done) {
+        Promise.all([LoadCanvasKit, notoSerifFontLoaded]).then(catchException(done, () => {
+            const fontMgr = CanvasKit.SkFontMgr.RefDefault();
+            const typeface = fontMgr.MakeTypefaceFromData(notSerifFontBuffer);
+            const fontSizes = [257, 100, 11];
+            // The point of these values is to let us know 1) we can measure to sub-pixel levels
+            // and 2) that measurements don't drastically change. If these change a little bit,
+            // just update them with the new values. For super-accurate readings, one could
+            // run a C++ snippet of code and compare the values, but that is likely unnecessary
+            // unless we suspect a bug with the bindings.
+            const expectedSizes = [1178.71143, 458.64258, 50.450683]
+            for (const idx in fontSizes) {
+                const font = new CanvasKit.SkFont(typeface, fontSizes[idx]);
+                font.setHinting(CanvasKit.FontHinting.None);
+                font.setLinearMetrics(true);
+                font.setSubpixel(true);
+
+                const res = font.measureText('someText');
+                expect(res).toBeCloseTo(expectedSizes[idx], 5);
+                font.delete();
+            }
+
+            typeface.delete();
             fontMgr.delete();
             done();
         }));

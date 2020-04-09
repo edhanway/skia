@@ -79,7 +79,8 @@ void sk_canvas_set_matrix(sk_canvas_t* ccanvas, const sk_matrix_t* cmatrix) {
 }
 
 void sk_canvas_get_total_matrix(sk_canvas_t* ccanvas, sk_matrix_t* cmatrix) {
-    *cmatrix = ToMatrix(&AsCanvas(ccanvas)->getTotalMatrix());
+    SkMatrix m = AsCanvas(ccanvas)->getTotalMatrix();
+    *cmatrix = ToMatrix(&m);
 }
 
 void sk_canvas_draw_round_rect(sk_canvas_t* ccanvas, const sk_rect_t* crect, float rx, float ry, const sk_paint_t* cpaint) {
@@ -230,16 +231,8 @@ void sk_canvas_draw_link_destination_annotation(sk_canvas_t* t, const sk_rect_t*
     SkAnnotateLinkToDestination(AsCanvas(t), *AsRect(rect), AsData(value));
 }
 
-void sk_canvas_draw_bitmap_lattice(sk_canvas_t* ccanvas, const sk_bitmap_t* bitmap, const sk_lattice_t* lattice, const sk_rect_t* dst, const sk_paint_t* paint) {
-    AsCanvas(ccanvas)->drawBitmapLattice(*AsBitmap(bitmap), *AsLattice(lattice), *AsRect(dst), AsPaint(paint));
-}
-
 void sk_canvas_draw_image_lattice(sk_canvas_t* ccanvas, const sk_image_t* image, const sk_lattice_t* lattice, const sk_rect_t* dst, const sk_paint_t* paint) {
     AsCanvas(ccanvas)->drawImageLattice(AsImage(image), *AsLattice(lattice), *AsRect(dst), AsPaint(paint));
-}
-
-void sk_canvas_draw_bitmap_nine(sk_canvas_t* ccanvas, const sk_bitmap_t* bitmap, const sk_irect_t* center, const sk_rect_t* dst, const sk_paint_t* paint) {
-    AsCanvas(ccanvas)->drawBitmapNine(*AsBitmap(bitmap), *AsIRect(center), *AsRect(dst), AsPaint(paint));
 }
 
 void sk_canvas_draw_image_nine(sk_canvas_t* ccanvas, const sk_image_t* image, const sk_irect_t* center, const sk_rect_t* dst, const sk_paint_t* paint) {

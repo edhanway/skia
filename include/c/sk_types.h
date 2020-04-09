@@ -899,6 +899,8 @@ typedef struct {
     float fTY;
 } sk_rsxform_t;
 
+typedef struct sk_runtimeeffect_t sk_runtimeeffect_t;
+
 SK_C_PLUS_PLUS_END_GUARD
 
 #endif

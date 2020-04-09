@@ -33,6 +33,7 @@
 #include "include/c/sk_pixmap.h"
 #include "include/c/sk_region.h"
 #include "include/c/sk_rrect.h"
+#include "include/c/sk_runtimeeffect.h"
 #include "include/c/sk_shader.h"
 #include "include/c/sk_stream.h"
 #include "include/c/sk_string.h"
@@ -79,6 +80,7 @@ void** KeepSkiaCSymbols (void)
         (void*)sk_pixmap_destructor,
         (void*)sk_region_new,
         (void*)sk_rrect_new,
+        (void*)sk_runtimeeffect_make,
         (void*)sk_shader_ref,
         (void*)sk_stream_asset_destroy,
         (void*)sk_string_new_empty,

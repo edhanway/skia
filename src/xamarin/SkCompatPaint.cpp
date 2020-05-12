@@ -11,7 +11,6 @@
 #include "include/utils/SkTextUtils.h"
 #include "include/xamarin/SkCompatPaint.h"
 
-
 SkCompatPaint::SkCompatPaint()
     : fFont(SkFont())
     , fTextAlign(SkTextUtils::Align::kLeft_Align)
@@ -56,9 +55,4 @@ void SkCompatPaint::setTextEncoding(SkTextEncoding encoding) {
 
 SkTextEncoding SkCompatPaint::getTextEncoding() const {
     return fTextEncoding;
-}
-
-size_t SkCompatPaint::breakText(const void* text, size_t length, SkScalar maxWidth, SkScalar* measuredWidth) const {
-    // TODO
-    return 0;
 }

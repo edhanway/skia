@@ -34,7 +34,7 @@ declare_args() {
   skia_moltenvk_path = ""
 
   ncli = ""
-  ncli_version = "4.0"
+  ncli_version = "6.0"
 
   werror = false
 }
@@ -179,11 +179,11 @@ if (is_tizen) {
   if (target_cpu == "arm") {
     ncli_target = "arm-tizen-linux-gnueabi"
     ncli_platform = "tizen-${ncli_version}/mobile/rootstraps/mobile-${ncli_version}-device.core"
-    ncli_gccdir = "arm-linux-gnueabi-gcc-6.2"
+    ncli_gccdir = "arm-linux-gnueabi-gcc-9.2"
   } else if (target_cpu == "x86") {
     ncli_target = "i586-tizen-linux-gnueabi"
     ncli_platform = "tizen-${ncli_version}/mobile/rootstraps/mobile-${ncli_version}-emulator.core"
-    ncli_gccdir = "i586-linux-gnueabi-gcc-6.2"
+    ncli_gccdir = "i586-linux-gnueabi-gcc-9.2"
   }
 }
 

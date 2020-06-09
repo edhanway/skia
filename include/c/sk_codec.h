@@ -14,6 +14,9 @@
 
 SK_C_PLUS_PLUS_BEGIN_GUARD
 
+/* Microsoft MRCS Addition */
+SK_C_API void sk_codec_set_cook_raw_images(bool);
+
 SK_C_API size_t sk_codec_min_buffered_bytes_needed(void);
 
 SK_C_API sk_codec_t* sk_codec_new_from_stream(sk_stream_t* stream, sk_codec_result_t* result);

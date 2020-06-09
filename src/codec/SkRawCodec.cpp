@@ -23,6 +23,27 @@
 #include "SkTemplates.h"
 #include "SkTypes.h"
 
+#include "SkImageInfo.h"
+
+// Modifications for Microsoft Mixed Reality Capture Studios - May 2020
+//
+// Replacement pipeline for DNG rendering - replaces dng_render processing with resample and conversion, skipping
+// all colorspace and tone mapping operations, returning result of "stage 3" processing (demosaiced, still linear)
+//
+
+// The line below is a workaround based on one used to compile the DNG SDK in externals\skia\third_party\dng_sdk\BUILD.gn
+//
+// From the note there:
+//  DNG SDK uses __builtin_smulll_overflow() to detect 64x64 bit multiply overflow.
+//  On some platforms, the compiler implements this with __mulodi4().
+//  I can't quite figure out how to link that here, so instead here's a shim for
+//  __builtin_smulll_overflow() that multiplies normally assuming no overflow.
+//  Tracked in b/29412086.
+//
+// Since this occurs in inlined code from dng_pixel_buffer here, a similar workaround is needed
+
+#define __builtin_smulll_overflow(x,y,p)    (*(p)=(x)*(y), false)
+
 #include "dng_area_task.h"
 #include "dng_color_space.h"
 #include "dng_errors.h"
@@ -33,10 +54,20 @@
 #include "dng_render.h"
 #include "dng_stream.h"
 
+#include "dng_resample.h"
+#include "dng_filter_task.h"
+#include "dng_bottlenecks.h"
+#include "dng_safe_arithmetic.h"
+#include "dng_pixel_buffer.h"
+
 #include "src/piex.h"
 
 #include <cmath>  // for std::round,floor,ceil
 #include <limits>
+
+// Control over MRCS-specific behavior, exposed in skia C API via sk_codec_set_cook_raw_images
+// Not thread safe; Intended to be set once at initialization for programs that need it
+bool gCookRawImages = false;
 
 namespace {
 
@@ -426,6 +457,227 @@ private:
     SkRawStream* fStream;
 };
 
+namespace {
+
+bool shouldCook() {
+    return gCookRawImages;
+}
+
+class dng_convert_task: public dng_filter_task {
+    // Based on dng_render_task with unwanted tone mapping removed - just handles differing number of samples and converts to output PixelType.
+
+protected:
+    const dng_negative &fNegative;
+    dng_point fSrcOffset;
+
+    AutoPtr<dng_memory_block> fTempBuffer [kMaxMPThreads];
+
+public:
+    dng_convert_task (const dng_image &srcImage,
+                        dng_image &dstImage,
+                        const dng_negative &negative,
+                        const dng_point &srcOffset);
+
+    virtual dng_rect SrcArea (const dng_rect &dstArea);
+
+    virtual void Start (uint32 threadCount,
+                        const dng_point &tileSize,
+                        dng_memory_allocator *allocator,
+                        dng_abort_sniffer *sniffer);
+
+    virtual void ProcessArea (uint32 threadIndex,
+                                dng_pixel_buffer &srcBuffer,
+                                dng_pixel_buffer &dstBuffer);
+
+};
+
+/*****************************************************************************/
+
+dng_convert_task::dng_convert_task (const dng_image &srcImage,
+                                  dng_image &dstImage,
+                                  const dng_negative &negative,
+                                  const dng_point &srcOffset)
+
+    :    dng_filter_task (srcImage, dstImage)
+    ,    fNegative  (negative )
+    ,   fSrcOffset (srcOffset) {
+
+    fSrcPixelType = ttFloat;
+    fDstPixelType = ttFloat;
+
+}
+
+/*****************************************************************************/
+
+dng_rect dng_convert_task::SrcArea (const dng_rect &dstArea) {
+    return dstArea + fSrcOffset;
+}
+
+/*****************************************************************************/
+
+void dng_convert_task::Start (uint32 threadCount,
+                             const dng_point &tileSize,
+                             dng_memory_allocator *allocator,
+                             dng_abort_sniffer *sniffer) {
+
+    dng_filter_task::Start (threadCount,
+                            tileSize,
+                            allocator,
+                            sniffer);
+
+    // Allocate temp buffer to hold one row of RGB data.
+
+    uint32 tempBufferSize = 0;
+
+    if (!SafeUint32Mult (tileSize.h, (uint32) sizeof (real32), &tempBufferSize) ||
+         !SafeUint32Mult (tempBufferSize, 3, &tempBufferSize)) {
+        ThrowMemoryFull("Arithmetic overflow computing buffer size.");
+    }
+
+    for (uint32 threadIndex = 0; threadIndex < threadCount; threadIndex++) {
+        fTempBuffer [threadIndex] . Reset (allocator->Allocate (tempBufferSize));
+    }
+}
+
+/*****************************************************************************/
+
+void dng_convert_task::ProcessArea (uint32 threadIndex,
+                                   dng_pixel_buffer &srcBuffer,
+                                   dng_pixel_buffer &dstBuffer) {
+
+    dng_rect srcArea = srcBuffer.fArea;
+    dng_rect dstArea = dstBuffer.fArea;
+
+    uint32 srcCols = srcArea.W ();
+
+    real32 *tPtrR = fTempBuffer [threadIndex]->Buffer_real32 ();
+
+    real32 *tPtrG = tPtrR + srcCols;
+    real32 *tPtrB = tPtrG + srcCols;
+
+    for (int32 srcRow = srcArea.t; srcRow < srcArea.b; srcRow++) {
+        {
+            const real32 *sPtrA = (const real32 *)
+                                  srcBuffer.ConstPixel (srcRow,
+                                                        srcArea.l,
+                                                        0);
+
+            if (fSrcPlanes == 1) {
+
+                // For monochrome cameras, this just requires copying
+                // the data into all three color channels.
+
+                DoCopyBytes (sPtrA, tPtrR, srcCols * (uint32) sizeof (real32));
+                DoCopyBytes (sPtrA, tPtrG, srcCols * (uint32) sizeof (real32));
+                DoCopyBytes (sPtrA, tPtrB, srcCols * (uint32) sizeof (real32));
+
+            } else {
+
+                const real32 *sPtrB = sPtrA + srcBuffer.fPlaneStep;
+                const real32 *sPtrC = sPtrB + srcBuffer.fPlaneStep;
+
+                DoCopyBytes (sPtrA, tPtrR, srcCols * (uint32) sizeof (real32));
+                DoCopyBytes (sPtrB, tPtrG, srcCols * (uint32) sizeof (real32));
+                DoCopyBytes (sPtrC, tPtrB, srcCols * (uint32) sizeof (real32));
+
+            }
+        }
+
+
+        int32 dstRow = srcRow + (dstArea.t - srcArea.t);
+
+        if (fDstPlanes == 1) {
+
+            real32 *dPtrG = dstBuffer.DirtyPixel_real32 (dstRow,
+                                                         dstArea.l,
+                                                         0);
+
+            DoCopyBytes (tPtrR, dPtrG, srcCols * (uint32) sizeof (real32));
+
+        } else {
+
+            real32 *dPtrR = dstBuffer.DirtyPixel_real32 (dstRow,
+                                                         dstArea.l,
+                                                         0);
+
+            real32 *dPtrG = dPtrR + dstBuffer.fPlaneStep;
+            real32 *dPtrB = dPtrG + dstBuffer.fPlaneStep;
+
+            DoCopyBytes (tPtrR, dPtrR, srcCols * (uint32) sizeof (real32));
+            DoCopyBytes (tPtrG, dPtrG, srcCols * (uint32) sizeof (real32));
+            DoCopyBytes (tPtrB, dPtrB, srcCols * (uint32) sizeof (real32));
+        }
+    }
+}
+
+dng_image * ResampleAndConvertStage3 (dng_host& host, dng_info& info, dng_negative& negative) {
+
+    dng_point stage3_size = negative.Stage3Image()->Size();
+    auto maxSize = SkTMax(stage3_size.h, stage3_size.v);
+
+    const dng_image *srcImage = negative.Stage3Image ();
+
+    dng_rect srcBounds = negative.DefaultCropArea ();
+
+    dng_point dstSize;
+
+    dstSize.h =    negative.DefaultFinalWidth  ();
+    dstSize.v = negative.DefaultFinalHeight ();
+
+    if (Max_uint32 (dstSize.h, dstSize.v) > maxSize) {
+
+        real64 ratio = negative.AspectRatio ();
+
+        if (ratio >= 1.0) {
+            dstSize.h = maxSize;
+            dstSize.v = Max_uint32 (1, Round_uint32 (dstSize.h / ratio));
+        } else {
+            dstSize.v = maxSize;
+            dstSize.h = Max_uint32 (1, Round_uint32 (dstSize.v * ratio));
+        }
+    }
+
+    AutoPtr<dng_image> tempImage;
+
+    if (srcBounds.Size () != dstSize) {
+        tempImage.Reset (host.Make_dng_image (dstSize,
+                                               srcImage->Planes    (),
+                                               srcImage->PixelType ()));
+
+        ResampleImage (host,
+                       *srcImage,
+                       *tempImage.Get (),
+                       srcBounds,
+                       tempImage->Bounds (),
+                       dng_resample_bicubic::Get ());
+
+        srcImage = tempImage.Get ();
+
+        srcBounds = tempImage->Bounds ();
+    }
+
+    auto& ifd = info.fIFD[info.fMainIndex];
+    bool isMono = ifd->fPhotometricInterpretation != piCFA && ifd->fSamplesPerPixel == 1;
+    uint32 bitDepth = ifd->fBitsPerSample[0];
+
+    AutoPtr<dng_image> dstImage (host.Make_dng_image (srcBounds.Size (),
+                                                       isMono ? 1 : 3,
+                                                       /*TODO: return deeper images; bitDepth > 8 ? ttShort : */ ttByte));
+
+    dng_convert_task task (*srcImage,
+                          *dstImage.Get (),
+                          negative,
+                          srcBounds.TL ());
+
+    host.PerformAreaTask (task,
+                           dstImage->Bounds ());
+
+    return dstImage.Release ();
+
+}
+
+} // namespace
+
 class SkDngImage {
 public:
     /*
@@ -491,21 +743,29 @@ public:
             negative->BuildStage2Image(*host);
             negative->BuildStage3Image(*host, kMosaicPlane);
 
-            dng_render render(*host, *negative);
-            render.SetFinalSpace(dng_space_sRGB::Get());
-            render.SetFinalPixelType(ttByte);
+            if(fCook)
+            {
+                dng_render render(*host, *negative);
+                render.SetFinalSpace(dng_space_sRGB::Get());
+                render.SetFinalPixelType(ttByte);
 
-            dng_point stage3_size = negative->Stage3Image()->Size();
-            render.SetMaximumSize(SkTMax(stage3_size.h, stage3_size.v));
+                dng_point stage3_size = negative->Stage3Image()->Size();
+                render.SetMaximumSize(SkTMax(stage3_size.h, stage3_size.v));
 
-            return render.Render();
+                return render.Render();
+            } else {
+                return ResampleAndConvertStage3(*host, *info, *negative);
+            }
         } catch (...) {
             return nullptr;
         }
     }
 
-    const SkEncodedInfo& getEncodedInfo() const {
-        return fEncodedInfo;
+    SkEncodedInfo getEncodedInfo() const {
+        return SkEncodedInfo::Make(
+            fPhotometricInterpretation == piLinearRaw ? SkEncodedInfo::kGray_Color : SkEncodedInfo::kRGB_Color,
+            SkEncodedInfo::kOpaque_Alpha,
+            fBitsPerComponent > 8 ? 16 : 8); // Note skia only handles 1,2,4,8,16 bpp here, so round up
     }
 
     int width() const {
@@ -522,6 +782,40 @@ public:
 
     bool isXtransImage() const {
         return fIsXtransImage;
+    }
+
+    SkColorSpaceXform::ColorFormat colorFormat() const {
+        return fColorFormat;
+    }
+
+    SkColorType colorType() const {
+        if (fCook) {
+            return kRGBA_8888_SkColorType;
+        }
+
+        if (fPhotometricInterpretation == piLinearRaw)
+        {
+            return kGray_8_SkColorType; //TODO: handle > 8 bit mono images when skia can support returning them
+        }
+
+        // TODO: handle > 8 bit color images when skia can support returning them
+        return /* fBitsPerComponent > 8 ? kRGBA_F16_SkColorType : */ kN32_SkColorType;
+    }
+
+    uint32 pixelType() const {
+        if (fCook) {
+            return ttByte;
+        }
+
+        // TODO: handle > 8 bit color images when skia can support returning them
+        return /*fBitsPerComponent > 8 ? ttShort : */ ttByte;
+    }
+
+    SkImageInfo imageInfo() const {
+        return SkImageInfo::Make(width(), height(),
+            colorType(),
+            SkAlphaType::kOpaque_SkAlphaType,
+            fCook ? SkColorSpace::MakeSRGB() : SkColorSpace::MakeSRGBLinear());
     }
 
     // Quick check if the image contains a valid TIFF header as requested by DNG format.
@@ -543,14 +837,18 @@ public:
     }
 
 private:
-    bool init(int width, int height, const dng_point& cfaPatternSize) {
+    bool init(int width, int height, const dng_point& cfaPatternSize, int bitsPerComponent, uint32 photometricInterpretation, bool cook) {
         fWidth = width;
         fHeight = height;
+        fBitsPerComponent = bitsPerComponent;
+        fPhotometricInterpretation = photometricInterpretation;
+        fCook = cook;
 
         // The DNG SDK scales only during demosaicing, so scaling is only possible when
         // a mosaic info is available.
         fIsScalable = cfaPatternSize.v != 0 && cfaPatternSize.h != 0;
         fIsXtransImage = fIsScalable ? (cfaPatternSize.v == 6 && cfaPatternSize.h == 6) : false;
+        fColorFormat = bitsPerComponent > 8 ? SkColorSpaceXform::kRGBA_U16_BE_ColorFormat : SkColorSpaceXform::kRGBA_8888_ColorFormat;
 
         return width > 0 && height > 0;
     }
@@ -564,7 +862,8 @@ private:
         {
             dng_point cfaPatternSize(imageData.cfa_pattern_dim[1], imageData.cfa_pattern_dim[0]);
             return this->init(static_cast<int>(imageData.full_width),
-                              static_cast<int>(imageData.full_height), cfaPatternSize);
+                              static_cast<int>(imageData.full_height), cfaPatternSize,
+                              8, piRGB, shouldCook());
         }
         return false;
     }
@@ -594,7 +893,10 @@ private:
             }
             return this->init(static_cast<int>(fNegative->DefaultCropSizeH().As_real64()),
                               static_cast<int>(fNegative->DefaultCropSizeV().As_real64()),
-                              cfaPatternSize);
+                              cfaPatternSize,
+                              fInfo->fIFD[fInfo->fMainIndex]->fBitsPerSample[0],
+                              fInfo->fIFD[fInfo->fMainIndex]->fPhotometricInterpretation,
+                              shouldCook());
         } catch (...) {
             return false;
         }
@@ -602,8 +904,6 @@ private:
 
     SkDngImage(SkRawStream* stream)
         : fStream(stream)
-        , fEncodedInfo(SkEncodedInfo::Make(SkEncodedInfo::kRGB_Color,
-                                           SkEncodedInfo::kOpaque_Alpha, 8))
     {}
 
     dng_memory_allocator fAllocator;
@@ -615,9 +915,12 @@ private:
 
     int fWidth;
     int fHeight;
-    SkEncodedInfo fEncodedInfo;
+    int fBitsPerComponent;
+    uint32 fPhotometricInterpretation;
     bool fIsScalable;
     bool fIsXtransImage;
+    SkColorSpaceXform::ColorFormat fColorFormat;
+    bool fCook;
 };
 
 /*
@@ -696,8 +999,8 @@ SkCodec::Result SkRawCodec::onGetPixels(const SkImageInfo& dstInfo, void* dst,
     SkImageInfo swizzlerInfo = dstInfo;
     std::unique_ptr<uint32_t[]> xformBuffer = nullptr;
     if (this->colorXform()) {
-        swizzlerInfo = swizzlerInfo.makeColorType(kRGBA_8888_SkColorType);
-        xformBuffer.reset(new uint32_t[dstInfo.width()]);
+        swizzlerInfo = swizzlerInfo.makeColorType(fDngImage->colorType());
+        xformBuffer.reset(new uint32_t[dstInfo.width()]); //FIXME - buffer size
     }
 
     std::unique_ptr<SkSwizzler> swizzler(SkSwizzler::CreateSwizzler(
@@ -721,7 +1024,7 @@ SkCodec::Result SkRawCodec::onGetPixels(const SkImageInfo& dstInfo, void* dst,
     }
 
     void* dstRow = dst;
-    SkAutoTMalloc<uint8_t> srcRow(width * 3);
+    SkAutoTMalloc<uint8_t> srcRow(width * 3 * 2);
 
     dng_pixel_buffer buffer;
     buffer.fData = &srcRow[0];
@@ -729,8 +1032,8 @@ SkCodec::Result SkRawCodec::onGetPixels(const SkImageInfo& dstInfo, void* dst,
     buffer.fPlanes = 3;
     buffer.fColStep = buffer.fPlanes;
     buffer.fPlaneStep = 1;
-    buffer.fPixelType = ttByte;
-    buffer.fPixelSize = sizeof(uint8_t);
+    buffer.fPixelType = fDngImage->pixelType();
+    buffer.fPixelSize = fDngImage->pixelType() == ttByte ? sizeof(uint8_t) : sizeof(uint16_t);
     buffer.fRowStep = width * 3;
 
     for (int i = 0; i < height; ++i) {
@@ -796,7 +1099,8 @@ bool SkRawCodec::onDimensionsSupported(const SkISize& dim) {
 SkRawCodec::~SkRawCodec() {}
 
 SkRawCodec::SkRawCodec(SkDngImage* dngImage)
-    : INHERITED(dngImage->width(), dngImage->height(), dngImage->getEncodedInfo(),
-                SkColorSpaceXform::kRGBA_8888_ColorFormat, nullptr,
-                SkColorSpace::MakeSRGB())
+    : INHERITED(dngImage->getEncodedInfo(),
+        dngImage->imageInfo(),
+        dngImage->colorFormat(), nullptr
+                )
     , fDngImage(dngImage) {}

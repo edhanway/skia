@@ -13,6 +13,12 @@
 
 #include "sk_types_priv.h"
 
+/* Microsoft MRCS Addition */
+void sk_codec_set_cook_raw_images(bool cook) {
+    extern bool gCookRawImages;
+    gCookRawImages = cook;
+}
+
 size_t sk_codec_min_buffered_bytes_needed() {
     return SkCodec::MinBufferedBytesNeeded();
 }
